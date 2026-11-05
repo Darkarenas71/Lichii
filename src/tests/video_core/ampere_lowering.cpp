@@ -251,4 +251,45 @@ TEST_CASE("Ampere guarded uniform comparisons keep the output when the guard is 
     REQUIRE(static_cast<bool>(selected));
     CHECK(selected.instructions.front() == 0x5ca000000df70403ULL);
 }
+
+TEST_CASE("Ampere TLD4.DC lowers to Maxwell TLD4.DC with the reference in the meta register",
+          "[video_core][ampere]") {
+    // Ocarina: TLD4.DC R12, R14, R24, R28, 0xe, 2D, 0xf (bit 78). x, y in R24, R25, reference
+    // in R28; four comparison results in R12, R13 and R14, R15.
+    const std::array<Instruction, 2> code{{
+        {{0x180c7b63, 0x30800e1c, 0x001e4f0e, 0x000f4200}},
+        EXIT,
+    }};
+    const auto lowered = LowerToMaxwell(code);
+    INFO(lowered.error);
+    REQUIRE(static_cast<bool>(lowered));
+    const std::array<u64, 8> expected{
+        0x5c980780018700faULL, 0x5c980780019700fbULL, 0x5c98078001c700f6ULL,
+        0xc83c00e7af67fafaULL, // TLD4.DC R250, R250, R246, 2D, 0xf, 0xe
+        0x5c9807800fa7000cULL, 0x5c9807800fb7000dULL, 0x5c9807800fc7000eULL,
+        0x5c9807800fd7000fULL};
+    CHECK(std::search(lowered.instructions.begin(), lowered.instructions.end(), expected.begin(),
+                      expected.end()) != lowered.instructions.end());
+
+    // With an offset (bits 76-78 = 5) the offset stays in Rb and the reference moves to Rb+1.
+    const std::array<Instruction, 2> offset{{
+        {{0x180c7b63, 0x30800e1c, 0x001e5f0e, 0x000f4200}},
+        EXIT,
+    }};
+    const auto offset_lowered = LowerToMaxwell(offset);
+    INFO(offset_lowered.error);
+    REQUIRE(static_cast<bool>(offset_lowered));
+    CHECK(std::count(offset_lowered.instructions.begin(), offset_lowered.instructions.end(),
+                     0x5c98078001c700f6ULL) == 1); // MOV R246, R28 (offset)
+    CHECK(std::count(offset_lowered.instructions.begin(), offset_lowered.instructions.end(),
+                     0x5c98078001d700f7ULL) == 1); // MOV R247, R29 (reference)
+    CHECK(CountMaxwell(offset_lowered, 0xc87c00e7af67fafaULL >> 50, 50) == 1);
+
+    // Depth-compare gathers from arrays, bindless handles or with per-tap offsets stay rejected.
+    const std::array<Instruction, 2> per_tap{{
+        {{0x180c7b63, 0x30800e1c, 0x001e6f0e, 0x000f4200}},
+        EXIT,
+    }};
+    CHECK_FALSE(static_cast<bool>(LowerToMaxwell(per_tap)));
+}
 } // namespace
